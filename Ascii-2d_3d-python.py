@@ -2470,4 +2470,139 @@ class DeferredRenderer:
                          ASCII_PALETTE['low'])
                 self.out[y][x]=ascii_resolve(palette,g)
         return "\n".join("".join(r) for r in self.out)
+# Import từ các module đã định nghĩa
+# ASCCIPipeline, Mesh, Camera, Light, Vec3, Mat4, Canvas, DeviceContextWithLayers, Pen, Brush, Font
+
+class ASCIISceneManager:
+    """
+    Quản lý vòng lặp chính (Main Loop) để tự động hóa quá trình render 3D và 2D Overlay.
+    """
+    def __init__(self, width=120, height=40):
+        self.width = width
+        self.height = height
+        
+        # 1. KHỞI TẠO PIPELINE 3D
+        self.pipeline = ASCIIPipeline(width, height)
+        self.camera = Camera(position=Vec3(0, 2, 5), target=Vec3(0, 0, 0), aspect=width / height)
+        self.pipeline.set_camera(self.camera)
+        self.light = Light(position=Vec3(5, 5, 5), intensity=2.0)
+        self.pipeline.add_light(self.light)
+        
+        # 2. KHỞI TẠO VẬT THỂ
+        self.cube_mesh = Mesh.create_cube(size=2.0)
+        
+        # 3. KHỞI TẠO LỚP 2D (OVERLAY/HUD)
+        # Sử dụng Framebuffer 3D làm nền cho lớp 2D
+        self.overlay_canvas = Canvas(width, height)
+        self.dc_layers = DeviceContextWithLayers(self.overlay_canvas)
+        self.hud_layer = self.dc_layers.add_layer(alpha=1.0) # Lớp 2D
+        
+        # Biến trạng thái
+        self.running = True
+        self.angle = 0.0
+        self.fps_limit = 30.0 # Giới hạn 30 FPS
+        
+    def _update_logic(self, dt: float):
+        """Cập nhật logic game: xoay, di chuyển..."""
+        self.angle += math.radians(45.0) * dt
+        
+        # Xoay khối lập phương
+        self.cube_mesh.transform = Mat4.rotation_y(self.angle) @ Mat4.rotation_x(self.angle/2)
+        
+        # Di chuyển camera (Ví dụ: Quay quanh trục Y)
+        cam_dist = 5.0
+        cam_x = math.sin(self.angle / 3) * cam_dist
+        cam_z = math.cos(self.angle / 3) * cam_dist
+        self.camera.position = Vec3(cam_x, 2.0, cam_z)
+        self.pipeline.set_camera(self.camera)
+
+    def _render_3d(self):
+        """Bước 1: Render 3D vào Framebuffer của Pipeline"""
+        self.pipeline.clear()
+        self.pipeline.render_mesh(self.cube_mesh)
+
+    def _render_2d_overlay(self, fps: float):
+        """
+        Bước 2: Render Overlay 2D.
+        Tận dụng Canvas 2D để vẽ lên trên Framebuffer 3D.
+        """
+        # --- Chuyển 3D Framebuffer thành nền 2D ---
+        # Lấy frame 3D (không kèm FPS) để làm nền (output 3D là 1 chuỗi)
+        self.pipeline.renderer.show_fps = False
+        frame_3d_str = self.pipeline.get_frame()
+        self.pipeline.renderer.show_fps = True
+        
+        # Load frame 3D vào canvas nền 
+        rows = frame_3d_str.split('\n')
+        for y, row in enumerate(rows):
+            for x, char in enumerate(row):
+                self.overlay_canvas.set(x, y, char)
+
+        # --- Vẽ các đối tượng 2D (HUD) lên Layer ---
+        dc_hud = DeviceContext(self.hud_layer.canvas)
+        dc_hud.canvas.clear(' ') # Xóa layer HUD trước
+
+        # FPS Text
+        dc_hud.select_font(Font(size=1))
+        dc_hud.select_brush(Brush(gradient=ASCIIShader.SHADING_CHARS))
+        fps_text = f"ASCII 3D Engine | FPS: {fps:.1f}"
+        dc_hud.text_out(1, 1, fps_text)
+
+        # Draw a custom shape (ví dụ: một đường tròn)
+        dc_hud.select_pen(Pen('O'))
+        dc_hud.text_out(self.width - 15, self.height - 2, "CUBE", align='center')
+
+        # --- Tổng hợp và Hiển thị ---
+        self.dc_layers.render_layers() # Layer 3D + Layer HUD
+        return self.overlay_canvas.to_string()
+
+    def run_scene(self):
+        """Vòng lặp chính tự động render và hiển thị"""
+        print(f"Starting ASCII 3D Engine ({self.width}x{self.height}). Press Ctrl+C to exit.")
+        
+        last_time = time.perf_counter()
+        
+        while self.running:
+            try:
+                current_time = time.perf_counter()
+                frame_time = current_time - last_time
+                last_time = current_time
+                
+                dt = frame_time
+                fps = 1.0 / dt if dt > 0 else 0.0
+                
+                # --- 1. CẬP NHẬT LOGIC ---
+                self._update_logic(dt)
+                
+                # --- 2. RENDER 3D ---
+                self._render_3d()
+                self.pipeline.renderer.frame_time = dt # Cập nhật frame_time cho việc tính FPS
+                
+                # --- 3. RENDER 2D OVERLAY & TỔNG HỢP ---
+                final_frame = self._render_2d_overlay(fps)
+                
+                # --- 4. HIỂN THỊ ---
+                print("\033[H" + final_frame) # \033[H (ANSI escape) đưa con trỏ về góc trên trái
+                
+                # --- 5. ĐIỀU CHỈNH TỐC ĐỘ (FPS Cap) ---
+                time_to_sleep = (1.0 / self.fps_limit) - (time.perf_counter() - current_time)
+                if time_to_sleep > 0:
+                    time.sleep(time_to_sleep)
+
+            except KeyboardInterrupt:
+                self.running = False
+                print("\nExiting ASCIISceneManager.")
+            except Exception as e:
+                self.running = False
+                print(f"\nAn error occurred: {e}")
+
+# ============================================================================
+# EXECUTION EXAMPLE
+# ============================================================================
+
+# if __name__ == "__main__":
+#     # Khởi tạo và chạy
+#     # scene_manager = ASCIISceneManager(width=120, height=40)
+#     # scene_manager.run_scene()
+#     pass
              
