@@ -955,24 +955,6 @@ class Instancer:
             renderer.render(mesh_copy)
 
 # ============================================================================
-# GBuffer ASCII
-# ============================================================================
-class GBuffer:
-    """ASCII-only GBuffer: brightness, normal, depth"""
-    def __init__(self, width, height):
-        self.width = width
-        self.height = height
-        self.brightness = np.zeros((height, width))
-        self.normal = [[Vec3(0,0,1) for _ in range(width)] for _ in range(height)]
-        self.depth = np.full((height, width), float('inf'))
-    
-    def clear(self):
-        self.brightness.fill(0)
-        for y in range(self.height):
-            for x in range(self.width):
-                self.normal[y][x] = Vec3(0,0,1)
-                self.depth[y,x] = float('inf')   
-# ============================================================================
 # ASCII Shader & Lighting Module
 # ============================================================================
 
@@ -2372,7 +2354,6 @@ class GBuffer:
         self.albedo=[[Vec3(1,1,1) for _ in range(w)] for __ in range(h)]
         self.rough=[[0.5]*w for _ in range(h)]
         self.metal=[[0.0]*w for _ in range(h)]
-
 # ================================================================
 # PBR – COOK TORRANCE (SPEC CORRECT)
 # ================================================================
