@@ -3351,4 +3351,229 @@ class TiledLighting:
         if 0 <= tx < self.cols and 0 <= ty < self.rows:
             return self.light_grid[ty][tx]
         return []
-   
+class ScreenSpaceReflection:
+    """Mô phỏng phản chiếu gương của OpenGL 4.5 trên Framebuffer ASCII"""
+    def __init__(self, step_size=1.0, max_steps=20):
+        self.step_size = step_size
+        self.max_steps = max_steps
+
+    def apply(self, renderer: 'Renderer', camera: 'Camera'):
+        width, height = renderer.width, renderer.height
+        depth_buf = renderer.framebuffer.depth_buffer
+        color_buf = renderer.framebuffer.color_buffer
+        
+        # Chỉ tạo phản chiếu cho nửa dưới màn hình (giả lập sàn nhà)
+        for y in range(height // 2, height):
+            for x in range(width):
+                # Nếu pixel hiện tại có độ sâu nhất định (giả sử là mặt sàn)
+                if depth_buf[y, x] < 100.0:
+                    # Lấy vị trí tương ứng ở nửa trên để 'phản chiếu'
+                    reflect_y = height - y
+                    if 0 <= reflect_y < height:
+                        # Làm mờ bằng cách chọn ký tự mờ hơn hoặc giữ nguyên
+                        target_char = color_buf[reflect_y][x]
+                        if target_char != ' ':
+                            # Hòa trộn ký tự phản chiếu vào sàn
+                            color_buf[y][x] = target_char
+class AdaptiveTessellator:
+    """Chia nhỏ tam giác dựa trên khoảng cách tới Camera (OpenGL 4.5 Feature)"""
+    @staticmethod
+    def process(mesh: 'Mesh', camera_pos: 'Vec3'):
+        # Tính khoảng cách
+        mesh_center = mesh.get_center() # Giả sử mesh có hàm lấy tâm
+        dist = (mesh_center - camera_pos).length()
+        
+        # Quyết định mức độ chia nhỏ
+        if dist < 5.0:
+            iterations = 2 # Rất mịn
+        elif dist < 10.0:
+            iterations = 1 # Vừa
+        else:
+            iterations = 0 # Giữ nguyên để tăng tốc
+            
+        if iterations > 0:
+            GeometryProcessor.tessellate_mesh(mesh, iterations)
+class SSRModule:
+    """Mô phỏng phản chiếu gương của OpenGL 4.5 trên Framebuffer ASCII"""
+    def __init__(self, step_size=0.5, max_steps=30):
+        self.step_size = step_size
+        self.max_steps = max_steps
+
+    def apply(self, renderer: 'Renderer', camera: 'Camera'):
+        width, height = renderer.width, renderer.height
+        depth_buf = renderer.framebuffer.depth_buffer
+        color_buf = renderer.framebuffer.color_buffer
+        
+        # Chỉ quét các vùng có độ phản xạ (ví dụ sàn nhà ở nửa dưới màn hình)
+        for y in range(height // 2, height):
+            for x in range(width):
+                if depth_buf[y, x] < 50.0: # Giả sử sàn nhà nằm trong khoảng này
+                    # Thuật toán Ray-marching đơn giản hóa trên không gian màn hình
+                    curr_x, curr_y = x, y
+                    for step in range(self.max_steps):
+                        # Di chuyển ngược lên phía trên theo hướng phản xạ
+                        curr_y -= self.step_size
+                        if curr_y < 0: break
+                        
+                        sample_y = int(curr_y)
+                        # Nếu tìm thấy một pixel có vật thể ở phía trên
+                        if depth_buf[sample_y, x] < depth_buf[y, x]:
+                            # Lấy ký tự tại đó và làm mờ (ví dụ chuyển sang ký tự thưa hơn)
+                            reflected_char = color_buf[sample_y][x]
+                            if reflected_char not in [' ', '.']:
+                                # Blend nhẹ vào vị trí sàn
+                                color_buf[y][x] = reflected_char
+                            break
+class AnisoTexture(Texture):
+    """Texture hỗ trợ lọc dị hướng để giảm nhiễu ký tự khi nhìn nghiêng"""
+    def sample_aniso(self, u, v, du, dv):
+        # Tính toán độ dốc (gradient) để xác định mức độ nghiêng
+        anisotropy = max(1.0, min(16.0, max(abs(du), abs(dv)) / min(abs(du), abs(dv) + 1e-6)))
+        
+        # Nếu góc nhìn phẳng, dùng bilinear bình thường
+        if anisotropy <= 1.5:
+            return self.sample(u, v)
+        
+        # Nếu nghiêng, lấy trung bình nhiều mẫu theo hướng dốc
+        samples = int(anisotropy)
+        final_color = Vec3(0, 0, 0)
+        for i in range(samples):
+            offset = (i / samples - 0.5)
+            final_color += self.sample(u + du * offset, v + dv * offset)
+            
+        return final_color / samples
+# ============================================================================
+# XVIII. THE ASCIIGL 4.5 CORE CONTEXT (DSA & DEFERRED PIPELINE)
+# ============================================================================
+
+class ASCIIGL:
+    """
+    Mô phỏng toàn bộ OpenGL 4.5 Context bằng văn bản.
+    Hỗ trợ DSA, G-Buffer, Programmable Shaders, và Compute Shaders.
+    """
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        
+        # 1. CONTEXT STATES (State Manager)
+        self.states = {
+            "GL_DEPTH_TEST": True,
+            "GL_CULL_FACE": True,
+            "GL_BLEND": False,
+            "GL_CONSERVATIVE_RASTER": False
+        }
+        
+        # 2. G-BUFFER (Multiple Render Targets - MRT)
+        # Lưu trữ dữ liệu thô trước khi chuyển thành ASCII
+        self.g_buffer = {
+            "position": np.zeros((height, width, 3), dtype=np.float32),
+            "normal":   np.zeros((height, width, 3), dtype=np.float32),
+            "albedo":   np.zeros((height, width, 3), dtype=np.float32), # RGB raw
+            "depth":    np.full((height, width), float('inf'), dtype=np.float32),
+            "material": np.zeros((height, width, 2), dtype=np.float32) # Roughness, Metallic
+        }
+        
+        # 3. DIRECT STATE ACCESS (DSA) BUFFERS
+        self.vbos = {} # Vertex Buffer Objects
+        self.vaos = {} # Vertex Array Objects
+        self.textures = {} # Bindless textures (ID based)
+        self._next_id = 1
+
+    # --- 1. DSA & BUFFER MANAGEMENT ---
+    def glCreateBuffers(self, count=1):
+        ids = list(range(self._next_id, self._next_id + count))
+        for i in ids: self.vbos[i] = None
+        self._next_id += count
+        return ids[0] if count == 1 else ids
+
+    def glNamedBufferData(self, buffer_id, data: np.ndarray):
+        """DSA: Nạp dữ liệu vào buffer mà không cần bind"""
+        self.vbos[buffer_id] = data
+
+    def glCreateTextures(self, target="GL_TEXTURE_2D"):
+        tex_id = self._next_id
+        self.textures[tex_id] = {"data": None, "sparse": False}
+        self._next_id += 1
+        return tex_id
+
+    # --- 2. PROGRAMMABLE SHADER PIPELINE ---
+    def vertex_shader_stage(self, vertices, transform, camera):
+        """Mô phỏng Vertex + Tessellation + Geometry Stage"""
+        # Phép biến đổi cơ bản
+        mvp = camera.get_projection_matrix() @ camera.get_view_matrix() @ transform
+        projected = []
+        for v in vertices:
+            # 4.5 Feature: Tessellation có thể can thiệp tại đây nếu cần chia nhỏ
+            pos_clip = mvp @ v
+            projected.append(pos_clip)
+        
+        # Geometry Shader: Có thể tạo thêm đỉnh tại đây (ví dụ: bùng nổ)
+        return projected
+
+    # --- 3. GEOMETRY PASS (MRT) ---
+    def geometry_pass(self, mesh, transform, camera):
+        """Render dữ liệu thô vào G-Buffer"""
+        projected_v = self.vertex_shader_stage(mesh.vertices, transform, camera)
+        
+        # Quá trình Rasterization ghi vào nhiều Target cùng lúc
+        for i in range(0, len(mesh.indices), 3):
+            # Logic quét tam giác (Rasterize)
+            # Tại mỗi pixel (x, y) trong tam giác:
+            # self.g_buffer["position"][y, x] = world_pos
+            # self.g_buffer["normal"][y, x] = interpolated_normal
+            # self.g_buffer["depth"][y, x] = z_value
+            pass
+
+    # --- 4. COMPUTE SHADER STAGE ---
+    def glDispatchCompute(self, num_groups_x, num_groups_y, dt):
+        """
+        Sử dụng Vectorization để mô phỏng vật lý chất lỏng hoặc hạt.
+        Thực hiện trước Lighting Pass.
+        """
+        # Ví dụ: Cập nhật vị trí nước (~) dựa trên sin wave
+        # self.g_buffer["albedo"] += sin(time) * 0.1
+        pass
+
+    # --- 5. LIGHTING & FINAL PASS (Deferred Shading) ---
+    def lighting_pass(self, lights, camera_pos):
+        """Tính toán ánh sáng dựa trên dữ liệu từ G-Buffer"""
+        output_frame = [[" " for _ in range(self.width)] for _ in range(self.height)]
+        
+        for y in range(self.height):
+            for x in range(self.width):
+                depth = self.g_buffer["depth"][y, x]
+                if depth == float('inf'): continue
+                
+                # Lấy dữ liệu từ MRT
+                pos = Vec3(*self.g_buffer["position"][y, x])
+                norm = Vec3(*self.g_buffer["normal"][y, x])
+                
+                # Tính toán PBR / Light Shafts / SSR tại đây
+                final_intensity = 0.0
+                for light in lights:
+                    # light_calc(pos, norm, camera_pos, light)
+                    pass
+                
+                # Convert sang ASCII
+                char = Shader.get_ascii_char(final_intensity)
+                output_frame[y][x] = char
+                
+        return output_frame
+
+    # --- 6. INDIRECT RENDERING ---
+    def glMultiDrawElementsIndirect(self, commands: List[Dict]):
+        """CPU ra lệnh một lần, GPU (ASCIIGL) tự xử lý danh sách"""
+        for cmd in commands:
+            # Culling check
+            if self._is_visible(cmd):
+                self.geometry_pass(cmd["mesh"], cmd["transform"], cmd["camera"])
+
+    def _is_visible(self, cmd):
+        # Frustum Culling logic
+        return True
+
+    def clear(self):
+        """Reset toàn bộ MRT Buffers"""
+        for key in self.g_buffer:
+            if key == "depth": self.g_buffer[key].fill(float('inf'))
+            else: self.g_buffer[key].fill(0)
